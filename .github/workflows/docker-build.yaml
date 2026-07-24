@@ -59,13 +59,13 @@ jobs:
           cache-to: type=gha,mode=max
 
   publish:
-    name: Publish Docker image to GHCR
+    name: Publish Docker image to Artifact Registry
     needs: test
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
+      id-token: write
 
     steps:
       - name: Checkout code
@@ -77,18 +77,26 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Log in to GitHub Container Registry
+      - name: Keyless auth with GCP
+        id: auth
+        uses: google-github-actions/auth@v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          token_format: access_token
+
+      - name: Log in to Google Artifact Registry
         uses: docker/login-action@v4
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          registry: europe-west1-docker.pkg.dev
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
 
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ghcr.io/loql-com/grafana-whatsapp-webhook
+          images: europe-west1-docker.pkg.dev/ocfood-platform/common-docker-images/grafana-whatsapp-webhook
           flavor: |
             latest=false
           tags: |
