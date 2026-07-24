@@ -27,7 +27,7 @@ docker run -p 8080:8080 \
   --rm \
   -v ./data:/app/data \
   -v ./out:/app/out \
-  -d ghcr.io/optiop/grafana-whatsapp-webhook:latest
+  -d ghcr.io/loql-com/grafana-whatsapp-webhook:latest
 ```
 
 > The `-v ./data:/app/data` mount persists your WhatsApp session so you don't need to re-authenticate after a restart.

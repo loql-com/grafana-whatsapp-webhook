@@ -17,7 +17,7 @@ services:
       - "3000:3000"
 
   whatsapp_service:
-    image: ghcr.io/optiop/grafana-whatsapp-webhook:latest
+    image: ghcr.io/loql-com/grafana-whatsapp-webhook:latest
     restart: unless-stopped
     user: root
     hostname: webhook

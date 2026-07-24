@@ -3,11 +3,11 @@ package whatsapp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"strings"
 	"sync"
-	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/mdp/qrterminal"
@@ -21,28 +21,36 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
+var (
+	ErrWhatsAppUnavailable = errors.New("WhatsApp is not connected")
+	errWhatsAppQueueFull   = errors.New("WhatsApp message queue is full")
+)
+
 type WhatsappService struct {
 	client *whatsmeow.Client
+
+	mu    sync.RWMutex
+	ready bool
 
 	cUserMessage,
 	cGroupMessage chan entity.Message
 }
 
-func New(ctx context.Context, wg *sync.WaitGroup) *WhatsappService {
-	if _, err := os.Stat("data"); errors.Is(err, os.ErrNotExist) {
-		if err := os.Mkdir("data", os.ModePerm); err != nil && !os.IsExist(err) {
-			log.Fatal(err)
-		}
-	}
-
-	wa := &WhatsappService{
+func New() *WhatsappService {
+	return &WhatsappService{
 		cUserMessage:  make(chan entity.Message, 1024),
 		cGroupMessage: make(chan entity.Message, 1024),
 	}
+}
 
-	wa.setupWhatsappService(ctx, wg)
-
-	return wa
+func (ws *WhatsappService) Start(ctx context.Context, wg *sync.WaitGroup) {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := ws.setupWhatsappService(ctx); err != nil {
+			log.Printf("WhatsApp initialization failed: %v", err)
+		}
+	}()
 }
 
 func (*WhatsappService) eventHandler(evt any) {
@@ -55,12 +63,6 @@ func (*WhatsappService) eventHandler(evt any) {
 // setupWhatsappService initializes and sets up the WhatsApp service for the given WhatsappService instance.
 // It configures logging, connects to the database, retrieves the device store, and establishes a connection
 // to the WhatsApp client. It also handles QR code generation for new logins and retrieves the list of joined groups.
-// Additionally, it starts goroutines to handle sending user and group messages and disconnecting the client.
-//
-// Parameters:
-//   - ctx: The context for managing the lifecycle of the service.
-//   - wg: A wait group to synchronize the shutdown process.
-//
 // The function performs the following steps:
 //  1. Configures logging based on the APP_DEBUG environment variable.
 //  2. Connects to the SQLite database and retrieves the device store.
@@ -68,13 +70,17 @@ func (*WhatsappService) eventHandler(evt any) {
 //  4. Handles QR code generation for new logins if the client is not already authenticated.
 //  5. Connects the client to the WhatsApp service.
 //  6. Retrieves and logs the list of joined groups.
-//  7. Starts goroutines for handling user messages, group messages, and client disconnection.
+//  7. Starts and waits for the user and group message workers.
 //
-// If any error occurs during the setup process, the function logs the error and panics.
+// If initialization fails, the function returns the error so the HTTP service can
+// remain available for its liveness probe.
 func (ws *WhatsappService) setupWhatsappService(
 	ctx context.Context,
-	wg *sync.WaitGroup,
-) {
+) error {
+	if err := os.MkdirAll("data", os.ModePerm); err != nil {
+		return err
+	}
+
 	debug := strings.ToLower(os.Getenv("APP_DEBUG")) == "true"
 	level := "INFO"
 
@@ -85,16 +91,18 @@ func (ws *WhatsappService) setupWhatsappService(
 	dbLog := waLog.Stdout("Database", level, true)
 	container, err := sqlstore.New(ctx, "sqlite3", "data/sqlite3.db?_foreign_keys=on", dbLog)
 	if err != nil {
-		log.Panic(err)
+		return err
 	}
 
 	deviceStore, err := container.GetFirstDevice(ctx)
 	if err != nil {
-		log.Panic(err)
+		return err
 	}
 
 	clientLog := waLog.Stdout("Client", level, true)
 	client := whatsmeow.NewClient(deviceStore, clientLog)
+	ws.client = client
+	defer client.Disconnect()
 
 	// connectedCh is closed on the first events.Connected, signalling that the
 	// WebSocket handshake (including any 515 server-redirect reconnect) is done.
@@ -108,31 +116,21 @@ func (ws *WhatsappService) setupWhatsappService(
 	client.AddEventHandler(ws.eventHandler)
 
 	if client.Store.ID == nil {
-		qrChan, _ := client.GetQRChannel(context.Background())
+		qrChan, err := client.GetQRChannel(ctx)
+		if err != nil {
+			return err
+		}
 		err = client.Connect()
 		if err != nil {
-			log.Panic(err)
+			return err
 		}
-		for evt := range qrChan {
-			if evt.Event == "code" {
-				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
-				if _, err := os.Stat("out"); errors.Is(err, os.ErrNotExist) {
-					if err := os.Mkdir("out", os.ModePerm); err != nil && !os.IsExist(err) {
-						log.Println("Error creating 'out' directory: ", err)
-					}
-				}
-				err := qrcode.WriteFile(evt.Code, qrcode.Medium, 256, "out/qr.png")
-				if err != nil {
-					log.Println("Error: to create qr code png file: ", err)
-				}
-			} else {
-				log.Println("Login event:", evt.Event)
-			}
+		if err := waitForQRPairing(ctx, qrChan, writeQRCode); err != nil {
+			return err
 		}
 	} else {
 		err = client.Connect()
 		if err != nil {
-			log.Panic(err)
+			return err
 		}
 	}
 
@@ -141,79 +139,161 @@ func (ws *WhatsappService) setupWhatsappService(
 	select {
 	case <-connectedCh:
 	case <-ctx.Done():
-		return
+		return nil
 	}
 
 	groups, err := client.GetJoinedGroups(ctx)
 	if err != nil {
-		log.Panic(err)
+		log.Printf("failed to retrieve joined WhatsApp groups: %v", err)
+	} else {
+		log.Println("Joined groups:")
+		for _, group := range groups {
+			log.Println("Name: ", group.Name)
+			log.Println("Jid: ", group.JID)
+			log.Println("----------------")
+		}
 	}
 
-	log.Println("Joined groups:")
-	for _, group := range groups {
-		log.Println("Name: ", group.Name)
-		log.Println("Jid: ", group.JID)
-		log.Println("----------------")
+	ws.setReady(true)
+	defer ws.setReady(false)
+
+	var senderWG sync.WaitGroup
+	senderWG.Add(2)
+	go func() {
+		defer senderWG.Done()
+		ws.handleSendUserMessages(ctx)
+	}()
+	go func() {
+		defer senderWG.Done()
+		ws.handleSendGroupMessages(ctx)
+	}()
+	<-ctx.Done()
+	senderWG.Wait()
+	return nil
+}
+
+func waitForQRPairing(
+	ctx context.Context,
+	qrChan <-chan whatsmeow.QRChannelItem,
+	onCode func(string),
+) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case evt, ok := <-qrChan:
+			if !ok {
+				return errors.New("WhatsApp QR pairing channel closed before success")
+			}
+			switch evt.Event {
+			case "code":
+				onCode(evt.Code)
+			case "success":
+				return nil
+			case "error":
+				if evt.Error != nil {
+					return evt.Error
+				}
+				return errors.New("WhatsApp QR pairing failed")
+			default:
+				return fmt.Errorf("WhatsApp QR pairing failed: %s", evt.Event)
+			}
+		}
+	}
+}
+
+func writeQRCode(code string) {
+	qrterminal.GenerateHalfBlock(code, qrterminal.L, os.Stdout)
+	if _, err := os.Stat("out"); errors.Is(err, os.ErrNotExist) {
+		if err := os.Mkdir("out", os.ModePerm); err != nil && !os.IsExist(err) {
+			log.Println("Error creating 'out' directory: ", err)
+		}
+	}
+	if err := qrcode.WriteFile(code, qrcode.Medium, 256, "out/qr.png"); err != nil {
+		log.Println("Error: to create QR code PNG file: ", err)
+	}
+}
+
+func (ws *WhatsappService) SendNewWhatsAppMessageToUser(msg entity.Message) error {
+	return ws.enqueue(ws.cUserMessage, msg)
+}
+
+func (ws *WhatsappService) SendNewWhatsAppMessageToGroup(msg entity.Message) error {
+	return ws.enqueue(ws.cGroupMessage, msg)
+}
+
+func (ws *WhatsappService) enqueue(queue chan<- entity.Message, msg entity.Message) error {
+	ws.mu.RLock()
+	defer ws.mu.RUnlock()
+
+	if !ws.ready {
+		return ErrWhatsAppUnavailable
 	}
 
-	ws.client = client
-
-	go ws.handleSendUserMessages(ctx)
-	go ws.handleSendGroupMessages(ctx)
-	go ws.disconnect(ctx, wg)
+	select {
+	case queue <- msg:
+		return nil
+	default:
+		return errWhatsAppQueueFull
+	}
 }
 
-func (ws *WhatsappService) SendNewWhatsAppMessageToUser(msg entity.Message) {
-	ws.cUserMessage <- msg
-}
-
-func (ws *WhatsappService) SendNewWhatsAppMessageToGroup(msg entity.Message) {
-	ws.cGroupMessage <- msg
+func (ws *WhatsappService) setReady(ready bool) {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	ws.ready = ready
 }
 
 func (ws *WhatsappService) handleSendUserMessages(ctx context.Context) {
-	for msg := range ws.cUserMessage {
-		to := types.NewJID(msg.To, "s.whatsapp.net")
-		message := &waE2E.Message{
-			ExtendedTextMessage: &waE2E.ExtendedTextMessage{
-				Text: &msg.Body,
-			},
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
 		}
 
-		_, err := ws.client.SendMessage(ctx, to, message)
-		if err != nil {
-			log.Printf("failed to send user message to %s: %v", msg.To, err)
+		select {
+		case <-ctx.Done():
+			return
+		case msg := <-ws.cUserMessage:
+			to := types.NewJID(msg.To, "s.whatsapp.net")
+			message := &waE2E.Message{
+				ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+					Text: &msg.Body,
+				},
+			}
+
+			_, err := ws.client.SendMessage(ctx, to, message)
+			if err != nil {
+				log.Printf("failed to send user message to %s: %v", msg.To, err)
+			}
 		}
 	}
 }
 
 func (ws *WhatsappService) handleSendGroupMessages(ctx context.Context) {
-	for msg := range ws.cGroupMessage {
-		groupJID := types.NewJID(msg.To, "g.us")
-		message := &waE2E.Message{
-			ExtendedTextMessage: &waE2E.ExtendedTextMessage{
-				Text: &msg.Body,
-			},
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
 		}
 
-		_, err := ws.client.SendMessage(ctx, groupJID, message)
-		if err != nil {
-			log.Printf("failed to send group message to %s: %v", msg.To, err)
+		select {
+		case <-ctx.Done():
+			return
+		case msg := <-ws.cGroupMessage:
+			groupJID := types.NewJID(msg.To, "g.us")
+			message := &waE2E.Message{
+				ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+					Text: &msg.Body,
+				},
+			}
+
+			_, err := ws.client.SendMessage(ctx, groupJID, message)
+			if err != nil {
+				log.Printf("failed to send group message to %s: %v", msg.To, err)
+			}
 		}
 	}
-}
-
-func (ws *WhatsappService) disconnect(
-	ctx context.Context,
-	wg *sync.WaitGroup,
-) {
-	defer wg.Done()
-
-	<-ctx.Done()
-	close(ws.cUserMessage)
-	close(ws.cGroupMessage)
-
-	<-time.After(3 * time.Second)
-
-	ws.client.Disconnect()
 }

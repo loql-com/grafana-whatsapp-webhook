@@ -17,9 +17,9 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
-	wg.Add(3)
-	ws := whatsapp.New(ctx, &wg)
+	ws := whatsapp.New()
 	service.Run(ctx, ws, &wg)
+	ws.Start(ctx, &wg)
 
 	wg.Wait()
 	fmt.Println("Program terminated gracefully")

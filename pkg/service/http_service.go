@@ -18,8 +18,8 @@ const maxBodyBytes = 1 << 20 // 1 MB
 
 // MessageSender is satisfied by *whatsapp.WhatsappService and can be mocked in tests.
 type MessageSender interface {
-	SendNewWhatsAppMessageToUser(msg entity.Message)
-	SendNewWhatsAppMessageToGroup(msg entity.Message)
+	SendNewWhatsAppMessageToUser(msg entity.Message) error
+	SendNewWhatsAppMessageToGroup(msg entity.Message) error
 }
 
 var appToken = os.Getenv("WEBHOOK_SECRET")
@@ -64,11 +64,19 @@ func sendNewGrafanaAlertWhatsAppMessageToUser(ms MessageSender) http.HandlerFunc
 			return
 		}
 
-		ms.SendNewWhatsAppMessageToUser(entity.Message{
+		if ms == nil {
+			http.Error(w, "WhatsApp is not connected", http.StatusServiceUnavailable)
+			return
+		}
+
+		if err := ms.SendNewWhatsAppMessageToUser(entity.Message{
 			To:   phoneNumber,
 			Type: "user",
 			Body: alert.Message,
-		})
+		}); err != nil {
+			http.Error(w, "WhatsApp is not connected", http.StatusServiceUnavailable)
+			return
+		}
 
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("Message sent to " + phoneNumber))
@@ -100,22 +108,26 @@ func sendNewGrafanaAlertWhatsAppMessageToGroup(ms MessageSender) http.HandlerFun
 			return
 		}
 
-		ms.SendNewWhatsAppMessageToGroup(entity.Message{
+		if ms == nil {
+			http.Error(w, "WhatsApp is not connected", http.StatusServiceUnavailable)
+			return
+		}
+
+		if err := ms.SendNewWhatsAppMessageToGroup(entity.Message{
 			To:   groupId,
 			Type: "group",
 			Body: alert.Message,
-		})
+		}); err != nil {
+			http.Error(w, "WhatsApp is not connected", http.StatusServiceUnavailable)
+			return
+		}
 
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("Message sent to " + groupId))
 	}
 }
 
-func Run(
-	ctx context.Context,
-	ms MessageSender,
-	wg *sync.WaitGroup,
-) {
+func newHTTPHandler(ms MessageSender) http.Handler {
 	httpMux := http.NewServeMux()
 
 	httpMux.HandleFunc("GET /healthy", func(w http.ResponseWriter, r *http.Request) {
@@ -150,9 +162,18 @@ func Run(
 		})
 	}
 
+	return loggingMiddleware(corsMiddleware(httpMux))
+}
+
+func Run(
+	ctx context.Context,
+	ms MessageSender,
+	wg *sync.WaitGroup,
+) {
+	wg.Add(2)
 	server := &http.Server{
 		Addr:    ":8080",
-		Handler: loggingMiddleware(corsMiddleware(httpMux)),
+		Handler: newHTTPHandler(ms),
 	}
 
 	go func() {
