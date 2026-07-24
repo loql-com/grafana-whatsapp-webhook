@@ -4,7 +4,6 @@ go 1.26.0
 
 require (
 	github.com/mattn/go-sqlite3 v1.14.48
-	github.com/mdp/qrterminal v1.0.1
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	go.mau.fi/whatsmeow v0.0.0-20260722203353-e9a033b24933
 )
@@ -29,5 +28,4 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
-	rsc.io/qr v0.2.0 // indirect
 )

@@ -2,15 +2,17 @@ package whatsapp
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strings"
 	"sync"
 
 	_ "github.com/mattn/go-sqlite3"
-	"github.com/mdp/qrterminal"
 	"github.com/optiop/grafana-whatsapp-webhook/pkg/entity"
 	"github.com/skip2/go-qrcode"
 	"go.mau.fi/whatsmeow"
@@ -203,15 +205,43 @@ func waitForQRPairing(
 }
 
 func writeQRCode(code string) {
-	qrterminal.GenerateHalfBlock(code, qrterminal.L, os.Stdout)
-	if _, err := os.Stat("out"); errors.Is(err, os.ErrNotExist) {
-		if err := os.Mkdir("out", os.ModePerm); err != nil && !os.IsExist(err) {
-			log.Println("Error creating 'out' directory: ", err)
-		}
+	image, err := writeQRCodeLog(code, os.Stdout)
+	if err != nil {
+		log.Println("Error writing QR code log entry: ", err)
+		return
 	}
-	if err := qrcode.WriteFile(code, qrcode.Medium, 256, "out/qr.png"); err != nil {
+	if err := os.MkdirAll("out", 0o755); err != nil {
+		log.Println("Error creating 'out' directory: ", err)
+		return
+	}
+	if err := os.WriteFile("out/qr.png", image, 0o600); err != nil {
 		log.Println("Error: to create QR code PNG file: ", err)
 	}
+}
+
+func writeQRCodeLog(code string, output io.Writer) ([]byte, error) {
+	image, err := qrcode.Encode(code, qrcode.Medium, 256)
+	if err != nil {
+		return nil, fmt.Errorf("encode QR code as PNG: %w", err)
+	}
+
+	entry := struct {
+		Severity    string `json:"severity"`
+		Event       string `json:"event"`
+		Message     string `json:"message"`
+		MIMEType    string `json:"mime_type"`
+		ImageBase64 string `json:"image_base64"`
+	}{
+		Severity:    "INFO",
+		Event:       "whatsapp_qr_code",
+		Message:     "WhatsApp pairing QR code generated",
+		MIMEType:    "image/png",
+		ImageBase64: base64.StdEncoding.EncodeToString(image),
+	}
+	if err := json.NewEncoder(output).Encode(entry); err != nil {
+		return nil, fmt.Errorf("write structured QR code log entry: %w", err)
+	}
+	return image, nil
 }
 
 func (ws *WhatsappService) SendNewWhatsAppMessageToUser(msg entity.Message) error {
