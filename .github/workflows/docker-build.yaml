@@ -63,6 +63,8 @@ jobs:
     needs: test
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.image.outputs.tag }}
     permissions:
       contents: read
       id-token: write
@@ -71,8 +73,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v7
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
+      - name: Set image tag
+        id: image
+        run: echo "tag=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -104,7 +107,7 @@ jobs:
             type=sha,format=short,prefix=
             type=semver,pattern={{version}},value=${{ github.ref_name }}
 
-      - name: Build and push multi-architecture image
+      - name: Build and push image
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -114,4 +117,32 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to Cloud Run
+    needs: publish
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Keyless auth with GCP
+        uses: google-github-actions/auth@v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Deploy to Cloud Run
+        env:
+          IMAGE: europe-west1-docker.pkg.dev/ocfood-platform/common-docker-images/grafana-whatsapp-webhook:${{ needs.publish.outputs.image_tag }}
+        run: |
+          gcloud run deploy grafana-whatsapp-webhook \
+            --image="$IMAGE" \
+            --region=europe-west1 \
+            --project=ocfood-platform
 
