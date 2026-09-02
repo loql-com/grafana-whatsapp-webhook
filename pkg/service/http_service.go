@@ -59,7 +59,8 @@ func sendNewGrafanaAlertWhatsAppMessageToUser(ms MessageSender) http.HandlerFunc
 			return
 		}
 
-		if alert.Message == "" {
+		body := alert.Text()
+		if body == "" {
 			http.Error(w, "message is required", http.StatusBadRequest)
 			return
 		}
@@ -72,7 +73,7 @@ func sendNewGrafanaAlertWhatsAppMessageToUser(ms MessageSender) http.HandlerFunc
 		if err := ms.SendNewWhatsAppMessageToUser(entity.Message{
 			To:   phoneNumber,
 			Type: "user",
-			Body: alert.Message,
+			Body: body,
 		}); err != nil {
 			http.Error(w, "WhatsApp is not connected", http.StatusServiceUnavailable)
 			return
@@ -103,7 +104,8 @@ func sendNewGrafanaAlertWhatsAppMessageToGroup(ms MessageSender) http.HandlerFun
 			return
 		}
 
-		if alert.Message == "" {
+		body := alert.Text()
+		if body == "" {
 			http.Error(w, "message is required", http.StatusBadRequest)
 			return
 		}
@@ -116,7 +118,7 @@ func sendNewGrafanaAlertWhatsAppMessageToGroup(ms MessageSender) http.HandlerFun
 		if err := ms.SendNewWhatsAppMessageToGroup(entity.Message{
 			To:   groupId,
 			Type: "group",
-			Body: alert.Message,
+			Body: body,
 		}); err != nil {
 			http.Error(w, "WhatsApp is not connected", http.StatusServiceUnavailable)
 			return

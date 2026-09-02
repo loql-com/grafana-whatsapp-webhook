@@ -71,6 +71,19 @@ Set up a **contact point** in Grafana with the following settings:
 
 Replace `<your_ip>`, `<phone_number>`, `<group_id>`, and `<WEBHOOK_SECRET>` with your actual values.
 
+### 7. (Optional) Trigger from Grafana OnCall
+The same endpoints also accept the payload of a **Grafana OnCall outgoing webhook**
+(`event` / `alert_group` / `alert_payload`), so you can call this service from an escalation chain:
+
+- URL: same as above
+- HTTP method: `POST`
+- Authorization header: `Bearer <WEBHOOK_SECRET>`
+- **Forward all** enabled (default) — no custom data template needed.
+
+The WhatsApp message is composed from the alert group state and title, the alert's
+`message` (or the `summary`/`description` annotations) and the alert group permalink.
+If a top-level `message` field is present (Grafana Alerting payload or a custom template), it is used as-is.
+
 > **Note:** Do not use `localhost` or `127.0.0.1` — use the actual IP address of your machine.
 
 > **⚠️ WARNING:** If you stop using this service, **unlink the device from WhatsApp** to maintain your account's security.

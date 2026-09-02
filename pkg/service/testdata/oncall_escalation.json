@@ -1,0 +1,51 @@
+{
+  "event": {"type": "escalation", "time": "2026-09-02T16:03:23.236023+00:00"},
+  "user": null,
+  "alert_group": {
+    "id": "I92K4UR5T78P7",
+    "integration_id": "CMTMMDZIJAD8Z",
+    "team_id": "TYCX199BANNLM",
+    "route_id": "RBPMDH4IHVERU",
+    "alerts_count": 1,
+    "state": "firing",
+    "created_at": "2026-09-02T15:48:06.360058Z",
+    "resolved_at": null,
+    "resolved_by": null,
+    "acknowledged_at": null,
+    "acknowledged_by": null,
+    "labels": [],
+    "title": "TestIncidentManagement ",
+    "permalinks": {
+      "slack": "https://example.slack.com/archives/C0BMA6E6DM2/p1788364086989729",
+      "slack_app": null,
+      "telegram": null,
+      "web": "https://grafana.example.com/a/grafana-oncall-app/alert-groups/I92K4UR5T78P7"
+    },
+    "silenced_at": null,
+    "last_alert": {"id": "A7PAVTU4NDJD3", "alert_group_id": "I92K4UR5T78P7", "created_at": "2026-09-02T15:48:06.374522Z"}
+  },
+  "alert_group_id": "I92K4UR5T78P7",
+  "alert_payload": {
+    "alerts": [
+      {
+        "endsAt": "0001-01-01T00:00:00Z",
+        "labels": {"env": "prod", "service": "checkout-api", "severity": "critical", "alertname": "TestIncidentManagement"},
+        "status": "firing",
+        "startsAt": "2026-09-02T15:48:05Z",
+        "annotations": {
+          "summary": "TEST: Checkout API Error-Rate > 5%",
+          "description": "Dies ist ein Test-Alert. Kein echter Vorfall."
+        },
+        "fingerprint": "testincident1788364085",
+        "generatorURL": "https://grafana.example.com/alerting/test"
+      }
+    ],
+    "status": "firing",
+    "commonLabels": {"alertname": "TestIncidentManagement", "severity": "critical"}
+  },
+  "integration": {"id": "CMTMMDZIJAD8Z", "type": "webhook", "name": "Test", "team": "platform"},
+  "notified_users": [],
+  "users_to_be_notified": [],
+  "alert_group_acknowledged_by": null,
+  "alert_group_resolved_by": null
+}
