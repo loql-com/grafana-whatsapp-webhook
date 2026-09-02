@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/optiop/grafana-whatsapp-webhook/pkg/entity"
@@ -238,5 +240,31 @@ func TestSendToGroup(t *testing.T) {
 				t.Errorf("message To = %q, want %q", sender.groupMessages[0].To, tc.groupID)
 			}
 		})
+	}
+}
+
+func TestSendToGroupAcceptsOnCallPayload(t *testing.T) {
+	appToken = "testtoken"
+	body, err := os.ReadFile("testdata/oncall_escalation.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sender := &mockSender{}
+	req := httptest.NewRequest(http.MethodPost, "/whatsapp/send/grafana-alert/group/120363417630801571", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer testtoken")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	newHTTPHandler(sender).ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d (%s), want %d", w.Code, w.Body.String(), http.StatusOK)
+	}
+	if len(sender.groupMessages) != 1 {
+		t.Fatalf("got %d messages, want 1", len(sender.groupMessages))
+	}
+	if !strings.HasPrefix(sender.groupMessages[0].Body, "[FIRING] TestIncidentManagement\n") {
+		t.Errorf("unexpected body %q", sender.groupMessages[0].Body)
 	}
 }
