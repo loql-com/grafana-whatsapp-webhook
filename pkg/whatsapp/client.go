@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/optiop/grafana-whatsapp-webhook/pkg/entity"
@@ -26,7 +27,12 @@ import (
 var (
 	ErrWhatsAppUnavailable = errors.New("WhatsApp is not connected")
 	errWhatsAppQueueFull   = errors.New("WhatsApp message queue is full")
+	errQRPairingTimeout    = errors.New("WhatsApp QR pairing timed out")
 )
+
+// qrPairingRetryDelay is the pause between two QR pairing rounds after the
+// previous round expired without the code being scanned.
+const qrPairingRetryDelay = 5 * time.Second
 
 type WhatsappService struct {
 	client *whatsmeow.Client
@@ -118,15 +124,20 @@ func (ws *WhatsappService) setupWhatsappService(
 	client.AddEventHandler(ws.eventHandler)
 
 	if client.Store.ID == nil {
-		qrChan, err := client.GetQRChannel(ctx)
+		// Not paired yet: keep offering fresh QR codes until one is scanned.
+		// whatsmeow disconnects the client itself when a QR round times out,
+		// so a new channel + Connect() starts a clean round.
+		err := pairUntilSuccess(ctx, qrPairingRetryDelay, func(ctx context.Context) error {
+			qrChan, err := client.GetQRChannel(ctx)
+			if err != nil {
+				return err
+			}
+			if err := client.Connect(); err != nil {
+				return err
+			}
+			return waitForQRPairing(ctx, qrChan, writeQRCode)
+		})
 		if err != nil {
-			return err
-		}
-		err = client.Connect()
-		if err != nil {
-			return err
-		}
-		if err := waitForQRPairing(ctx, qrChan, writeQRCode); err != nil {
 			return err
 		}
 	} else {
@@ -197,9 +208,38 @@ func waitForQRPairing(
 					return evt.Error
 				}
 				return errors.New("WhatsApp QR pairing failed")
+			case "timeout":
+				return errQRPairingTimeout
 			default:
 				return fmt.Errorf("WhatsApp QR pairing failed: %s", evt.Event)
 			}
+		}
+	}
+}
+
+// pairUntilSuccess runs one QR pairing round via attempt and repeats it after
+// retryDelay whenever the round ended with errQRPairingTimeout. Any other error
+// is returned immediately; a cancelled context ends the loop with ctx.Err().
+func pairUntilSuccess(ctx context.Context, retryDelay time.Duration, attempt func(context.Context) error) error {
+	for round := 1; ; round++ {
+		err := attempt(ctx)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, errQRPairingTimeout) {
+			return err
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		log.Printf("WhatsApp QR pairing round %d expired without a scan; generating a new QR code", round)
+
+		timer := time.NewTimer(retryDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
 		}
 	}
 }

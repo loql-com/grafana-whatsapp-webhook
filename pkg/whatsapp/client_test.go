@@ -96,3 +96,61 @@ func TestWriteQRCodeLogWritesSingleBase64PNGEntry(t *testing.T) {
 		t.Fatalf("decoded image is not a valid PNG: %v", err)
 	}
 }
+
+func TestWaitForQRPairingReturnsTimeoutSentinel(t *testing.T) {
+	qrChan := make(chan whatsmeow.QRChannelItem, 1)
+	qrChan <- whatsmeow.QRChannelTimeout
+	close(qrChan)
+
+	err := waitForQRPairing(context.Background(), qrChan, func(string) {})
+
+	if !errors.Is(err, errQRPairingTimeout) {
+		t.Fatalf("got %v, want errQRPairingTimeout", err)
+	}
+}
+
+func TestPairUntilSuccessRetriesAfterTimeout(t *testing.T) {
+	attempts := 0
+	err := pairUntilSuccess(context.Background(), 0, func(context.Context) error {
+		attempts++
+		if attempts < 3 {
+			return errQRPairingTimeout
+		}
+		return nil
+	})
+
+	if err != nil {
+		t.Fatalf("pairUntilSuccess returned %v", err)
+	}
+	if attempts != 3 {
+		t.Fatalf("got %d attempts, want 3", attempts)
+	}
+}
+
+func TestPairUntilSuccessStopsOnOtherErrors(t *testing.T) {
+	boom := errors.New("boom")
+	attempts := 0
+	err := pairUntilSuccess(context.Background(), 0, func(context.Context) error {
+		attempts++
+		return boom
+	})
+
+	if !errors.Is(err, boom) {
+		t.Fatalf("got %v, want boom", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("got %d attempts, want 1", attempts)
+	}
+}
+
+func TestPairUntilSuccessStopsWhenContextIsCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	err := pairUntilSuccess(ctx, 0, func(context.Context) error {
+		cancel()
+		return errQRPairingTimeout
+	})
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("got %v, want context.Canceled", err)
+	}
+}

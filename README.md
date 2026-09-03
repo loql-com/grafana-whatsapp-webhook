@@ -44,6 +44,14 @@ docker run -p 8080:8080 \
   - Open WhatsApp, go to **Linked Devices**, and select **Link a Device**.
   - Scan the QR code from `./out/qr.png` or from the logs.
 
+> **Note:** As long as no device is linked, the service keeps generating a fresh QR code
+> (each one is valid for ~20-60 s, a new one follows after a short pause). Just grab the latest
+> one from the logs whenever you are ready to scan. On Cloud Run, extract it with:
+> ```bash
+> gcloud logging read 'resource.labels.service_name="grafana-whatsapp-webhook" jsonPayload.event="whatsapp_qr_code"' \
+>   --project=<project> --limit=1 --format='value(jsonPayload.image_base64)' | base64 -d > qr.png
+> ```
+
 ### 5. Retrieve the Group JID (for Group Alerts)
 Once authentication is complete, stream logs to retrieve the WhatsApp **Group JID**:
 ```bash
