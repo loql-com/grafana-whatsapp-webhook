@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/optiop/grafana-whatsapp-webhook/pkg/entity"
@@ -26,7 +27,12 @@ import (
 var (
 	ErrWhatsAppUnavailable = errors.New("WhatsApp is not connected")
 	errWhatsAppQueueFull   = errors.New("WhatsApp message queue is full")
+	errQRPairingTimeout    = errors.New("WhatsApp QR pairing timed out")
 )
+
+// qrPairingRetryDelay is the pause between two QR pairing rounds after the
+// previous round expired without the code being scanned.
+const qrPairingRetryDelay = 5 * time.Second
 
 type WhatsappService struct {
 	client *whatsmeow.Client
@@ -56,36 +62,36 @@ func (ws *WhatsappService) Start(ctx context.Context, wg *sync.WaitGroup) {
 }
 
 func (*WhatsappService) eventHandler(evt any) {
-	switch v := evt.(type) {
-	case *events.Message:
+	if v, ok := evt.(*events.Message); ok {
 		log.Println("Received a message: ", v.Message.GetConversation())
 	}
 }
 
-// setupWhatsappService initializes and sets up the WhatsApp service for the given WhatsappService instance.
-// It configures logging, connects to the database, retrieves the device store, and establishes a connection
-// to the WhatsApp client. It also handles QR code generation for new logins and retrieves the list of joined groups.
-// The function performs the following steps:
-//  1. Configures logging based on the APP_DEBUG environment variable.
-//  2. Connects to the SQLite database and retrieves the device store.
-//  3. Initializes the WhatsApp client and sets up event handlers.
-//  4. Handles QR code generation for new logins if the client is not already authenticated.
-//  5. Connects the client to the WhatsApp service.
-//  6. Retrieves and logs the list of joined groups.
-//  7. Starts and waits for the user and group message workers.
+// sessionEventHandler returns an event handler bound to one session: a
+// LoggedOut event ends exactly that session via endSession.
+func sessionEventHandler(endSession func()) func(evt any) {
+	return func(evt any) {
+		if v, ok := evt.(*events.LoggedOut); ok {
+			log.Printf("WhatsApp session was logged out (reason: %s, on connect: %v); the linked device was removed", v.Reason, v.OnConnect)
+			endSession()
+		}
+	}
+}
+
+// setupWhatsappService opens the SQLite device store and then runs WhatsApp
+// sessions until ctx is cancelled. A session pairs (QR) or reconnects, serves
+// the message queues and ends when the device is logged out remotely; the next
+// session then starts fresh and offers a new QR code.
 //
 // If initialization fails, the function returns the error so the HTTP service can
 // remain available for its liveness probe.
-func (ws *WhatsappService) setupWhatsappService(
-	ctx context.Context,
-) error {
+func (ws *WhatsappService) setupWhatsappService(ctx context.Context) error {
 	if err := os.MkdirAll("data", os.ModePerm); err != nil {
 		return err
 	}
 
 	debug := strings.ToLower(os.Getenv("APP_DEBUG")) == "true"
 	level := "INFO"
-
 	if debug {
 		level = "DEBUG"
 	}
@@ -95,16 +101,35 @@ func (ws *WhatsappService) setupWhatsappService(
 	if err != nil {
 		return err
 	}
+	clientLog := waLog.Stdout("Client", level, true)
 
+	for {
+		if err := ws.runSession(ctx, container, clientLog); err != nil {
+			return err
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
+		log.Println("WhatsApp session ended; starting a new one (a QR code will be offered if no device is linked)")
+	}
+}
+
+// runSession runs one WhatsApp session. It returns nil when the session ended
+// because ctx was cancelled or the device was logged out, and an error when the
+// session could not be established.
+func (ws *WhatsappService) runSession(ctx context.Context, container *sqlstore.Container, clientLog waLog.Logger) error {
 	deviceStore, err := container.GetFirstDevice(ctx)
 	if err != nil {
 		return err
 	}
 
-	clientLog := waLog.Stdout("Client", level, true)
 	client := whatsmeow.NewClient(deviceStore, clientLog)
 	ws.client = client
 	defer client.Disconnect()
+
+	// sessionCtx ends when the parent ctx is cancelled or the device is logged out.
+	sessionCtx, endSession := context.WithCancel(ctx)
+	defer endSession()
 
 	// connectedCh is closed on the first events.Connected, signalling that the
 	// WebSocket handshake (including any 515 server-redirect reconnect) is done.
@@ -116,35 +141,41 @@ func (ws *WhatsappService) setupWhatsappService(
 		}
 	})
 	client.AddEventHandler(ws.eventHandler)
+	client.AddEventHandler(sessionEventHandler(endSession))
 
 	if client.Store.ID == nil {
-		qrChan, err := client.GetQRChannel(ctx)
+		// Not paired yet: keep offering fresh QR codes until one is scanned.
+		// whatsmeow disconnects the client itself when a QR round times out,
+		// so a new channel + Connect() starts a clean round.
+		err = pairUntilSuccess(sessionCtx, qrPairingRetryDelay, func(ctx context.Context) error {
+			qrChan, err := client.GetQRChannel(ctx)
+			if err != nil {
+				return err
+			}
+			if err := client.Connect(); err != nil {
+				return err
+			}
+			return waitForQRPairing(ctx, qrChan, writeQRCode)
+		})
 		if err != nil {
+			if sessionCtx.Err() != nil {
+				return nil
+			}
 			return err
 		}
-		err = client.Connect()
-		if err != nil {
-			return err
-		}
-		if err := waitForQRPairing(ctx, qrChan, writeQRCode); err != nil {
-			return err
-		}
-	} else {
-		err = client.Connect()
-		if err != nil {
-			return err
-		}
+	} else if err := client.Connect(); err != nil {
+		return err
 	}
 
 	// Wait until the connection is fully established before querying groups.
 	// This handles the 515 server-redirect reconnect that happens after pairing.
 	select {
 	case <-connectedCh:
-	case <-ctx.Done():
+	case <-sessionCtx.Done():
 		return nil
 	}
 
-	groups, err := client.GetJoinedGroups(ctx)
+	groups, err := client.GetJoinedGroups(sessionCtx)
 	if err != nil {
 		log.Printf("failed to retrieve joined WhatsApp groups: %v", err)
 	} else {
@@ -163,13 +194,13 @@ func (ws *WhatsappService) setupWhatsappService(
 	senderWG.Add(2)
 	go func() {
 		defer senderWG.Done()
-		ws.handleSendUserMessages(ctx)
+		ws.handleSendUserMessages(sessionCtx)
 	}()
 	go func() {
 		defer senderWG.Done()
-		ws.handleSendGroupMessages(ctx)
+		ws.handleSendGroupMessages(sessionCtx)
 	}()
-	<-ctx.Done()
+	<-sessionCtx.Done()
 	senderWG.Wait()
 	return nil
 }
@@ -197,9 +228,38 @@ func waitForQRPairing(
 					return evt.Error
 				}
 				return errors.New("WhatsApp QR pairing failed")
+			case "timeout":
+				return errQRPairingTimeout
 			default:
 				return fmt.Errorf("WhatsApp QR pairing failed: %s", evt.Event)
 			}
+		}
+	}
+}
+
+// pairUntilSuccess runs one QR pairing round via attempt and repeats it after
+// retryDelay whenever the round ended with errQRPairingTimeout. Any other error
+// is returned immediately; a cancelled context ends the loop with ctx.Err().
+func pairUntilSuccess(ctx context.Context, retryDelay time.Duration, attempt func(context.Context) error) error {
+	for round := 1; ; round++ {
+		err := attempt(ctx)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, errQRPairingTimeout) {
+			return err
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		log.Printf("WhatsApp QR pairing round %d expired without a scan; generating a new QR code", round)
+
+		timer := time.NewTimer(retryDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
 		}
 	}
 }
