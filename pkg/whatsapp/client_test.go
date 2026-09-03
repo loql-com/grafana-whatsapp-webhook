@@ -11,6 +11,7 @@ import (
 
 	"github.com/optiop/grafana-whatsapp-webhook/pkg/entity"
 	"go.mau.fi/whatsmeow"
+	whatsmeowevents "go.mau.fi/whatsmeow/types/events"
 )
 
 func TestNewDoesNotConnectToWhatsApp(t *testing.T) {
@@ -152,5 +153,17 @@ func TestPairUntilSuccessStopsWhenContextIsCancelled(t *testing.T) {
 
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("got %v, want context.Canceled", err)
+	}
+}
+
+func TestLoggedOutEventEndsCurrentSession(t *testing.T) {
+	ws := New()
+	ended := false
+	ws.onLoggedOut = func() { ended = true }
+
+	ws.eventHandler(&whatsmeowevents.LoggedOut{OnConnect: false, Reason: whatsmeowevents.ConnectFailureLoggedOut})
+
+	if !ended {
+		t.Fatal("LoggedOut event must end the current session")
 	}
 }
