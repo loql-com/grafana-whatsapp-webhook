@@ -37,9 +37,8 @@ const qrPairingRetryDelay = 5 * time.Second
 type WhatsappService struct {
 	client *whatsmeow.Client
 
-	mu          sync.RWMutex
-	ready       bool
-	onLoggedOut func() // ends the current session; set by runSession
+	mu    sync.RWMutex
+	ready bool
 
 	cUserMessage,
 	cGroupMessage chan entity.Message
@@ -62,17 +61,19 @@ func (ws *WhatsappService) Start(ctx context.Context, wg *sync.WaitGroup) {
 	}()
 }
 
-func (ws *WhatsappService) eventHandler(evt any) {
-	switch v := evt.(type) {
-	case *events.Message:
+func (*WhatsappService) eventHandler(evt any) {
+	if v, ok := evt.(*events.Message); ok {
 		log.Println("Received a message: ", v.Message.GetConversation())
-	case *events.LoggedOut:
-		log.Printf("WhatsApp session was logged out (reason: %s, on connect: %v); the linked device was removed", v.Reason, v.OnConnect)
-		ws.mu.RLock()
-		onLoggedOut := ws.onLoggedOut
-		ws.mu.RUnlock()
-		if onLoggedOut != nil {
-			onLoggedOut()
+	}
+}
+
+// sessionEventHandler returns an event handler bound to one session: a
+// LoggedOut event ends exactly that session via endSession.
+func sessionEventHandler(endSession func()) func(evt any) {
+	return func(evt any) {
+		if v, ok := evt.(*events.LoggedOut); ok {
+			log.Printf("WhatsApp session was logged out (reason: %s, on connect: %v); the linked device was removed", v.Reason, v.OnConnect)
+			endSession()
 		}
 	}
 }
@@ -129,9 +130,6 @@ func (ws *WhatsappService) runSession(ctx context.Context, container *sqlstore.C
 	// sessionCtx ends when the parent ctx is cancelled or the device is logged out.
 	sessionCtx, endSession := context.WithCancel(ctx)
 	defer endSession()
-	ws.mu.Lock()
-	ws.onLoggedOut = endSession
-	ws.mu.Unlock()
 
 	// connectedCh is closed on the first events.Connected, signalling that the
 	// WebSocket handshake (including any 515 server-redirect reconnect) is done.
@@ -143,12 +141,13 @@ func (ws *WhatsappService) runSession(ctx context.Context, container *sqlstore.C
 		}
 	})
 	client.AddEventHandler(ws.eventHandler)
+	client.AddEventHandler(sessionEventHandler(endSession))
 
 	if client.Store.ID == nil {
 		// Not paired yet: keep offering fresh QR codes until one is scanned.
 		// whatsmeow disconnects the client itself when a QR round times out,
 		// so a new channel + Connect() starts a clean round.
-		err := pairUntilSuccess(sessionCtx, qrPairingRetryDelay, func(ctx context.Context) error {
+		err = pairUntilSuccess(sessionCtx, qrPairingRetryDelay, func(ctx context.Context) error {
 			qrChan, err := client.GetQRChannel(ctx)
 			if err != nil {
 				return err

@@ -156,14 +156,17 @@ func TestPairUntilSuccessStopsWhenContextIsCancelled(t *testing.T) {
 	}
 }
 
-func TestLoggedOutEventEndsCurrentSession(t *testing.T) {
-	ws := New()
+func TestLoggedOutEventEndsItsOwnSession(t *testing.T) {
 	ended := false
-	ws.onLoggedOut = func() { ended = true }
+	handler := sessionEventHandler(func() { ended = true })
 
-	ws.eventHandler(&whatsmeowevents.LoggedOut{OnConnect: false, Reason: whatsmeowevents.ConnectFailureLoggedOut})
+	handler(&whatsmeowevents.Connected{})
+	if ended {
+		t.Fatal("only LoggedOut may end the session")
+	}
 
+	handler(&whatsmeowevents.LoggedOut{OnConnect: false, Reason: whatsmeowevents.ConnectFailureLoggedOut})
 	if !ended {
-		t.Fatal("LoggedOut event must end the current session")
+		t.Fatal("LoggedOut event must end the session it belongs to")
 	}
 }
